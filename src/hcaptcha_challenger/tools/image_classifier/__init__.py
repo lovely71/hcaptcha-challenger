@@ -57,7 +57,11 @@ class ImageClassifier(Reasoner[SCoTModelType, ImageBinaryChallenge]):
         """
         return await self._provider.generate_with_images(
             images=[Path(challenge_screenshot)],
-            user_prompt="Solve the challenge, use [0,0] ~ [2,2] to locate 9grid, output the coordinates of the correct answer as JSON.",
+            user_prompt="""Analyze the 3x3 grid and return a JSON object with:
+1. "challenge_prompt": The challenge instruction text
+2. "coordinates": Array of matching cells using [row, col] format (0-2)
+
+Output ONLY valid JSON, no markdown or explanation.""",
             description=self.description,
             response_schema=ImageBinaryChallenge,
             **kwargs,
