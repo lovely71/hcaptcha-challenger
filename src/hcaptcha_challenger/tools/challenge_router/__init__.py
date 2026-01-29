@@ -57,13 +57,11 @@ class ChallengeRouter(Reasoner[FastShotModelType, ChallengeRouterResult]):
         """
         return await self._provider.generate_with_images(
             images=[Path(challenge_screenshot)],
-            user_prompt="""
-Your task is to classify challenge questions into one of four types:
-- image_label_single_select (clicking ONE specific area/object)
-- image_label_multi_select (clicking MULTIPLE areas/objects)
-- image_drag_single (dragging ONE element/piece)
-- image_drag_multi (dragging MULTIPLE elements/pieces)
-""",
+            user_prompt="""Analyze this challenge screenshot and return a JSON object with:
+1. "challenge_prompt": The exact challenge question/instruction text visible in the image
+2. "challenge_type": One of: image_label_single_select, image_label_multi_select, image_drag_single, image_drag_multi
+
+Output ONLY valid JSON, no markdown or explanation.""",
             description=self.description,
             response_schema=ChallengeRouterResult,
             **kwargs,

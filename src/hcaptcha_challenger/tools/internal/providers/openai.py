@@ -20,14 +20,46 @@ from tenacity import retry, stop_after_attempt, wait_fixed
 ResponseT = TypeVar("ResponseT", bound=BaseModel)
 
 
-def extract_first_json_block(text: str) -> dict | None:
-    """Extract the first JSON code block from text."""
+def extract_json_from_text(text: str) -> dict | None:
+    """
+    Extract JSON from text using multiple strategies.
+    
+    Strategies (in order):
+    1. Extract from ```json ... ``` code block
+    2. Extract from ``` ... ``` code block (no language tag)
+    3. Find JSON object pattern { ... } in text
+    """
     import re
-
-    pattern = r"```json\s*([\s\S]*?)```"
-    matches = re.findall(pattern, text)
+    
+    # Strategy 1: Extract from ```json ... ``` code block
+    json_block_pattern = r"```json\s*([\s\S]*?)```"
+    matches = re.findall(json_block_pattern, text)
     if matches:
-        return json.loads(matches[0])
+        try:
+            return json.loads(matches[0].strip())
+        except json.JSONDecodeError:
+            pass
+    
+    # Strategy 2: Extract from ``` ... ``` code block (no language tag)
+    code_block_pattern = r"```\s*([\s\S]*?)```"
+    matches = re.findall(code_block_pattern, text)
+    if matches:
+        try:
+            return json.loads(matches[0].strip())
+        except json.JSONDecodeError:
+            pass
+    
+    # Strategy 3: Find JSON object pattern { ... } in text
+    # Match the outermost { ... } pair
+    json_object_pattern = r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}'
+    matches = re.findall(json_object_pattern, text)
+    if matches:
+        for match in matches:
+            try:
+                return json.loads(match)
+            except json.JSONDecodeError:
+                continue
+    
     return None
 
 
@@ -207,14 +239,20 @@ class OpenAIProvider:
 
         # Parse response
         if response_text:
+            # First try direct JSON parsing (for providers that support structured output)
             try:
-                json_data = json.loads(response_text)
+                json_data = json.loads(response_text.strip())
                 return response_schema(**json_data)
             except json.JSONDecodeError:
-                # Fallback: try to extract JSON block from markdown
-                json_data = extract_first_json_block(response_text)
-                if json_data:
+                pass
+            
+            # Fallback: extract JSON from text (for providers without structured output)
+            json_data = extract_json_from_text(response_text)
+            if json_data:
+                try:
                     return response_schema(**json_data)
+                except Exception as e:
+                    logger.warning(f"Failed to validate extracted JSON: {e}")
 
         raise ValueError(f"Failed to parse response: {response_text}")
 
