@@ -53,9 +53,19 @@ class SpatialReasoner(Reasoner[SCoTModelType, ResponseT], ABC):
         """
         images: List[Path] = [challenge_screenshot, grid_divisions]
 
+        # Build user prompt with JSON format requirement
+        json_instruction = (
+            "IMPORTANT: Output ONLY a valid JSON object. "
+            "No explanations, no markdown, no analysis text. Just pure JSON."
+        )
+        if auxiliary_information:
+            user_prompt = f"{auxiliary_information}\n\n{json_instruction}"
+        else:
+            user_prompt = json_instruction
+
         return await self._provider.generate_with_images(
             images=images,
-            user_prompt=auxiliary_information,
+            user_prompt=user_prompt,
             description=self.description,
             response_schema=response_schema,
             **kwargs,
