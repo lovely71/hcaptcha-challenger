@@ -452,6 +452,155 @@ class RoboticArm:
             return crumbs_count if crumbs_count else 1
         return self.config.MAX_CRUMB_COUNT if await crumbs.first.is_visible() else 1
 
+    @staticmethod
+    def _classify_by_prompt_text(prompt_text: str) -> ChallengeTypeEnum | None:
+        """
+        Classify challenge type based on prompt text keywords.
+
+        This provides a fast, lightweight classification without calling AI,
+        by detecting action keywords (drag/click) and quantity indicators (single/multiple).
+
+        Args:
+            prompt_text: The challenge prompt text to analyze.
+
+        Returns:
+            ChallengeTypeEnum if classification is confident, None otherwise.
+        """
+        if not prompt_text:
+            return None
+
+        text = prompt_text.lower()
+
+        # Keywords for drag actions (multi-language support)
+        drag_keywords = [
+            # English
+            "drag", "move", "place", "put", "arrange", "slide",
+            # Chinese
+            "拖", "拖动", "拖拽", "移动", "放置", "拖放",
+            # Russian
+            "перетащ", "перемест", "переместите",
+            # German
+            "ziehen", "verschieben",
+            # French
+            "glisser", "déplacer", "faites glisser",
+            # Spanish
+            "arrastr", "mover",
+            # Portuguese
+            "arrast", "mover",
+        ]
+
+        # Keywords for click/select actions (multi-language support)
+        click_keywords = [
+            # English
+            "click", "select", "tap", "touch", "choose", "pick",
+            # Chinese
+            "点击", "点选", "选择", "单击", "选中",
+            # Russian
+            "нажмите", "выберите", "кликните",
+            # German
+            "klicken", "wählen", "auswählen",
+            # French
+            "cliquez", "sélectionnez", "choisissez",
+            # Spanish
+            "haga clic", "seleccione", "clic",
+            # Portuguese
+            "clique", "selecione",
+        ]
+
+        # Keywords indicating multiple targets
+        multi_keywords = [
+            # English
+            "all", "each", "every", "multiple", "several", "both", "two", "three",
+            "pair", "pairs", "identical", "same", "matching",
+            # Chinese
+            "所有", "每个", "多个", "两个", "三个", "一对", "相同", "相似", "一样",
+            # Russian
+            "все", "каждый", "несколько", "два", "три", "одинаковых",
+            # German
+            "alle", "jede", "mehrere", "zwei", "drei", "gleichen",
+            # French
+            "tous", "toutes", "chaque", "plusieurs", "deux", "trois", "identiques",
+            # Spanish
+            "todos", "todas", "cada", "varios", "dos", "tres", "idénticos",
+            # Portuguese
+            "todos", "todas", "cada", "vários", "dois", "três", "idênticos",
+        ]
+
+        # Keywords indicating single target (more specific, avoid common words like "the")
+        single_keywords = [
+            # English - specific single indicators
+            "one ", " one", "single", "different", "unique", "odd one",
+            # Chinese
+            "一个", "单个", "不同", "独特", "唯一",
+            # Russian
+            "один", "одну", "отличающ", "уникальн",
+            # German
+            "einen", "eine", "unterschiedlich", "einzigartig",
+            # French
+            "différent", "unique",
+            # Spanish
+            "diferente", "único",
+            # Portuguese
+            "diferente", "único",
+        ]
+
+        # Detect action type
+        is_drag = any(keyword in text for keyword in drag_keywords)
+        is_click = any(keyword in text for keyword in click_keywords)
+
+        # Detect quantity - multi takes priority since it's more explicit
+        is_multi = any(keyword in text for keyword in multi_keywords)
+        is_single = any(keyword in text for keyword in single_keywords)
+
+        # Determine challenge type based on detected patterns
+        # Priority: multi keywords override single keywords (multi is more explicit)
+        if is_drag and not is_click:
+            # Drag action detected
+            if is_multi:
+                return ChallengeTypeEnum.IMAGE_DRAG_MULTI
+            # Default to single drag
+            return ChallengeTypeEnum.IMAGE_DRAG_SINGLE
+
+        if is_click and not is_drag:
+            # Click action detected
+            if is_multi:
+                return ChallengeTypeEnum.IMAGE_LABEL_MULTI_SELECT
+            # Default to single select
+            return ChallengeTypeEnum.IMAGE_LABEL_SINGLE_SELECT
+
+        # If both or neither action detected, return None to fallback to AI
+        return None
+
+    async def _get_prompt_text_from_dom(self, frame_challenge: Frame | FrameLocator) -> str | None:
+        """
+        Extract challenge prompt text from DOM elements.
+
+        Args:
+            frame_challenge: The challenge frame locator.
+
+        Returns:
+            The prompt text if found, None otherwise.
+        """
+        # Try common selectors for hCaptcha prompt text
+        prompt_selectors = [
+            "//h2[@class='prompt-text']",
+            "//div[@class='prompt-text']",
+            "//span[@class='prompt-text']",
+            "//div[contains(@class, 'prompt')]//h2",
+            "//div[contains(@class, 'task-grid')]//h2",
+            "//div[@class='challenge-header']//h2",
+        ]
+
+        for selector in prompt_selectors:
+            with suppress(Exception):
+                element = frame_challenge.locator(selector)
+                if await element.count() > 0:
+                    text = await element.first.text_content()
+                    if text and text.strip():
+                        return text.strip()
+
+        return None
+
     async def check_challenge_type(self) -> RequestType | ChallengeTypeEnum | None:
         # fixme
         with suppress(Exception):
@@ -466,6 +615,17 @@ class RoboticArm:
         if isinstance(count, int) and count == 0:
             tms = self.config.WAIT_FOR_CHALLENGE_VIEW_TO_RENDER_MS * 1.5
             await self.page.wait_for_timeout(tms)
+
+            # Try to classify by prompt text first (fast path, no AI call)
+            prompt_text = await self._get_prompt_text_from_dom(frame_challenge)
+            if prompt_text:
+                self._challenge_prompt = prompt_text
+                challenge_type = self._classify_by_prompt_text(prompt_text)
+                if challenge_type:
+                    logger.debug(f"Challenge type classified by keywords: {challenge_type.value}")
+                    return challenge_type
+
+            # Fallback to AI-based classification
             challenge_view = frame_challenge.locator("//div[@class='challenge-view']")
             cache_path = self.config.cache_dir.joinpath(f"challenge_view/_artifacts/{uuid4()}.png")
             cache_path.parent.mkdir(parents=True, exist_ok=True)
