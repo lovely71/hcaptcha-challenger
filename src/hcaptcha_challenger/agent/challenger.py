@@ -21,7 +21,7 @@ import matplotlib.pyplot as plt
 import msgpack
 from loguru import logger
 from playwright.async_api import Locator, expect, Page, Response, TimeoutError, FrameLocator, Frame
-from pydantic import Field, field_validator, SecretStr
+from pydantic import Field, model_validator, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from tenacity import retry, stop_after_attempt, wait_fixed
 
@@ -47,6 +47,7 @@ from hcaptcha_challenger.tools import (
     SpatialPathReasoner,
     SpatialPointReasoner,
 )
+from hcaptcha_challenger.tools.internal.providers.protocol import ChatProvider
 
 
 def _generate_bezier_trajectory(
@@ -116,11 +117,17 @@ IGNORE_REQUEST_TYPE_LIST = List[SINGLE_IGNORE_TYPE]
 
 
 class AgentConfig(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_ignore_empty=True, extra="ignore")
+    model_config = SettingsConfigDict(env_file=".env", env_ignore_empty=True, extra="ignore", arbitrary_types_allowed=True)
 
     GEMINI_API_KEY: SecretStr = Field(
         default_factory=lambda: SecretStr(os.environ.get("GEMINI_API_KEY", "")),
         description="Create API Key https://aistudio.google.com/app/apikey",
+    )
+
+    provider: ChatProvider | None = Field(
+        default=None,
+        description="Custom LLM provider (e.g., OpenAIProvider). "
+        "When set, GEMINI_API_KEY is not required.",
     )
 
     cache_dir: Path = Path("tmp/.cache")
@@ -201,28 +208,30 @@ class AgentConfig(BaseSettings):
     )
     skills_update_branch: str = Field(default="main", description="GitHub branch for skills update")
 
-    @field_validator('GEMINI_API_KEY', mode="before")
-    @classmethod
-    def validate_api_key(cls, v: Any) -> str:
+    @model_validator(mode="after")
+    def validate_provider_or_api_key(self) -> "AgentConfig":
         """
-        Validates that the GEMINI_API_KEY is not empty.
+        Validates that either a custom provider or GEMINI_API_KEY is provided.
 
-        Args:
-            v: The API key value to validate
+        When a custom provider is set, GEMINI_API_KEY is not required.
+        When no provider is set, GEMINI_API_KEY must be provided.
 
         Returns:
-            The validated API key
+            The validated config
 
         Raises:
-            ValueError: If the API key is empty
+            ValueError: If neither provider nor GEMINI_API_KEY is provided
         """
-        if not v or not isinstance(v, str):
+        has_provider = self.provider is not None
+        has_api_key = bool(self.GEMINI_API_KEY.get_secret_value())
+
+        if not has_provider and not has_api_key:
             raise ValueError(
-                "GEMINI_API_KEY is required but not provided. "
-                "Please either pass it directly or set the GEMINI_API_KEY environment variable."
-                "Create API Key -> https://aistudio.google.com/app/apikey"
+                "Either 'provider' or 'GEMINI_API_KEY' must be provided. "
+                "Set GEMINI_API_KEY environment variable or pass a custom provider. "
+                "Create Gemini API Key -> https://aistudio.google.com/app/apikey"
             )
-        return v
+        return self
 
     @property
     def spatial_grid_cache(self):
@@ -285,21 +294,29 @@ class RoboticArm:
         self.config = config
         self._debug = config.enable_challenger_debug
 
+        # Use custom provider if provided, otherwise use Gemini
+        _provider = self.config.provider
+        _api_key = self.config.GEMINI_API_KEY.get_secret_value()
+
         self._challenge_router = ChallengeRouter(
-            gemini_api_key=self.config.GEMINI_API_KEY.get_secret_value(),
+            gemini_api_key=_api_key,
             model=self.config.CHALLENGE_CLASSIFIER_MODEL,
+            provider=_provider,
         )
         self._image_classifier = ImageClassifier(
-            gemini_api_key=self.config.GEMINI_API_KEY.get_secret_value(),
+            gemini_api_key=_api_key,
             model=self.config.IMAGE_CLASSIFIER_MODEL,
+            provider=_provider,
         )
         self._spatial_path_reasoner = SpatialPathReasoner(
-            gemini_api_key=self.config.GEMINI_API_KEY.get_secret_value(),
+            gemini_api_key=_api_key,
             model=self.config.SPATIAL_PATH_REASONER_MODEL,
+            provider=_provider,
         )
         self._spatial_point_reasoner = SpatialPointReasoner(
-            gemini_api_key=self.config.GEMINI_API_KEY.get_secret_value(),
+            gemini_api_key=_api_key,
             model=self.config.SPATIAL_POINT_REASONER_MODEL,
+            provider=_provider,
         )
         self._skill_manager = SkillManager(agent_config=config)
         self.signal_crumb_count: int | None = None
